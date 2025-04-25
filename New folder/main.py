@@ -2,8 +2,6 @@
 # Runs the RespirationMonitor with automatic calibration, displays UI, and sends data via OSC.
 # v10: Final version for modular structure with automatic calibration.
 # MODIFIED: Fixed UnboundLocalError for start_loop_time
-# MODIFIED: Fixed AttributeError for UI data retrieval
-# MODIFIED: Fixed NameError for DummyOSCClient
 
 import time
 import numpy as np
@@ -23,16 +21,10 @@ except ImportError:
     print("Install it using: pip install python-osc")
     osc_available = False
     # Define dummy classes/functions if library is missing to avoid NameErrors later
-    class DummyOSCClient: # Define the dummy class
+    class DummyOSCClient:
         def send_message(self, address, value): pass
-    # --- Assign the dummy class correctly ---
-    # Assign to the specific class name used later if the real one isn't imported
-    if 'udp_client' not in locals() or not hasattr(udp_client, 'SimpleUDPClient'):
-         # If pythonosc failed import, udp_client might not be defined or might lack SimpleUDPClient
-         # Create a dummy module-like structure if needed
-         class DummyUdpClientModule:
-              SimpleUDPClient = DummyOSCClient
-         udp_client = DummyUdpClientModule
+    # Assign the dummy class to the name expected by the code
+    udp_client.SimpleUDPClient = DummyOSCClient # Assign to the specific class used later
 
 # --- Project Module Imports ---
 try:
@@ -208,12 +200,8 @@ class UIManager:
             if peaks is not None and len(peaks) > 0:
                 peak_indices = np.asarray(peaks)
                 # Ensure peaks are within current signal bounds and correspond to finite values
-                # Check plot_signal length before indexing
-                if len(plot_signal) > 0:
-                    valid_peak_mask = (peak_indices >= 0) & (peak_indices < len(plot_signal)) & np.isfinite(plot_signal[peak_indices])
-                    valid_peaks = peak_indices[valid_peak_mask]
-                else:
-                    valid_peaks = np.array([], dtype=int) # Empty array if plot_signal is empty
+                valid_peak_mask = (peak_indices >= 0) & (peak_indices < len(plot_signal)) & np.isfinite(plot_signal[peak_indices])
+                valid_peaks = peak_indices[valid_peak_mask]
 
                 if len(valid_peaks) > 0:
                     peak_values_normalized = plot_signal[valid_peaks] # Get normalized values at peak locations
@@ -291,15 +279,19 @@ class MainApplication:
             port = OSC_CONFIG.get('OSC_PORT', 9001)
             try:
                 # Ensure the correct class name is used based on import logic
-                # Check if the real SimpleUDPClient exists before trying to use it
-                if 'udp_client' in locals() and hasattr(udp_client, 'SimpleUDPClient') and not isinstance(udp_client.SimpleUDPClient, type(DummyOSCClient)):
+                if hasattr(udp_client, 'SimpleUDPClient'):
                      self.osc_client = udp_client.SimpleUDPClient(ip, port)
+                else: # Fallback if only the dummy was available
+                     self.osc_client = udp_client.SimpleUDPClient() # Instantiate dummy
+
+                # Check if it's not the dummy client before sending
+                if not isinstance(self.osc_client, DummyOSCClient):
                      print(f"OSC Client initialized. Sending to {ip}:{port}")
                      # Send connection status message
                      self.osc_client.send_message(OSC_CONFIG.get('OSC_ADDRESS_STATUS', "/respmon/status"), "connected")
-                else: # Fallback if only the dummy was available/assigned
-                     print("OSC Client is a dummy instance (python-osc likely missing or failed import).")
-                     self.osc_client = None # Ensure osc_client is None if dummy
+                else:
+                     print("OSC Client is a dummy instance (python-osc likely missing).")
+                     self.osc_client = None # Set to None if it's the dummy
 
             except Exception as e:
                 print(f"Error initializing OSC client: {e}")
@@ -358,7 +350,7 @@ class MainApplication:
         """Starts the monitor and runs the main processing loop."""
         self.running = True
         print("Starting Main Application...")
-        # Initialize variables used in finally block
+        # --- FIX: Initialize variables used in finally block ---
         start_loop_time = None # Initialize to None
         frame_count = 0      # Initialize frame_count
 
@@ -378,8 +370,8 @@ class MainApplication:
             self._initialize_osc()
             self._initialize_ui()
             print("Starting main processing loop (Press Ctrl+C or close UI window to exit)...")
-            # Assign actual start time here
-            start_loop_time = time.time()
+            # --- FIX: Assign start_loop_time only if initialization succeeds ---
+            start_loop_time = time.time() # Assign actual start time here
             self.last_loop_time = start_loop_time
 
             # --- Main Loop ---
@@ -388,17 +380,15 @@ class MainApplication:
                 results = self.monitor.run_cycle()
 
                 if not results['success']:
-                    # print(f"Monitor cycle failed: {results.get('error', 'Unknown')}") # Reduce noise
+                    print(f"Monitor cycle failed: {results.get('error', 'Unknown')}")
                     if results.get('error') == 'Video ended or failed': self.running = False
-                    time.sleep(0.01); continue # Short sleep on cycle failure
+                    time.sleep(0.1); continue
 
                 bpm = results['bpm']
                 normalized_signal = results['normalized_signal']
                 frame = results['frame']
                 roi = results['roi']
                 method = results['method']
-                # --- Get peaks from results dict ---
-                peaks = results.get('peaks', []) # Get peaks from monitor results
 
                 if hasattr(self.monitor, 'adaptive_controller') and self.monitor.adaptive_controller:
                     self.monitor.trigger_adaptation(self.current_fps)
@@ -407,9 +397,11 @@ class MainApplication:
 
                 if self.ui_manager:
                     self.ui_manager.display_frame(frame, roi)
-                    # --- CHANGE: Get data using monitor's helper methods ---
-                    filtered_signal_buffer = self.monitor.get_filtered_signal_history()
-                    # peaks list is already retrieved from results above
+                    filtered_signal_buffer = []
+                    peaks = []
+                    if hasattr(self.monitor, 'signal_processor'):
+                         filtered_signal_buffer = self.monitor.signal_processor.get_filtered_signal_history()
+                         peaks = self.monitor.signal_processor.get_last_detected_peaks()
 
                     self.ui_manager.display_plot(filtered_signal_buffer, peaks)
                     self.ui_manager.display_status(bpm, self.current_fps, method)
@@ -432,7 +424,7 @@ class MainApplication:
         finally:
             # --- Cleanup ---
             end_loop_time = time.time()
-            # Check if start_loop_time was set before using it
+            # --- FIX: Check if start_loop_time was set before using it ---
             if start_loop_time is not None:
                  total_time = end_loop_time - start_loop_time
                  if total_time > 0 and frame_count > 0:

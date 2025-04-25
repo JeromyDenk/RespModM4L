@@ -1,17 +1,13 @@
 # src/monitor.py
 # Contains the main RespirationMonitor class that orchestrates the process.
-# MODIFIED: Correctly handles calibration results and variance map passing.
-# MODIFIED: Added helper methods for UI data retrieval.
 
 import time
 import traceback # For error printing
 import cv2
-import numpy as np # Import numpy
 
 # Import necessary components from the src package
 try:
-    # Use relative imports assuming standard package structure
-    from .config_loader import load_config, MINIMAL_DEFAULTS
+    from .config_loader import load_config, MINIMAL_DEFAULTS # Use relative import
     from .video_input import VideoInput
     from .calibration import Calibration
     from .motion_detection import MotionDetector
@@ -46,8 +42,6 @@ class RespirationMonitor:
         self.signal_processor = None
         self.adaptive_controller = None
         self.roi = None
-        # Add variance_map placeholder
-        self.variance_map = None
         self.is_initialized = False
         self.last_frame = None # Store last frame for display/debugging if needed
 
@@ -68,100 +62,55 @@ class RespirationMonitor:
             self.video_input = VideoInput(self.config)
             if not self.video_input.initialize():
                 print("Monitor initialization failed: VideoInput failed.")
-                return False
+                return False # Cannot proceed without video
 
-            # 2. Determine ROI and Variance Map
-            self.roi = None
-            self.variance_map = None
-            self.calibration = None # Ensure calibration object is reset
-
-            # Check for valid manual ROI
-            if manual_roi is not None and isinstance(manual_roi, tuple) and len(manual_roi) == 4:
+            # 2. Determine ROI (Manual or Automatic Calibration)
+            if manual_roi is not None and len(manual_roi) == 4:
                 x, y, w, h = manual_roi
                 if w > 0 and h > 0:
                      print(f"Using manually provided ROI: {manual_roi}. Skipping automatic calibration.")
                      self.roi = manual_roi
-                     # No variance map when using manual ROI
-                     self.variance_map = None
                 else:
-                     print("Warning: Manual ROI has invalid dimensions. Proceeding with calibration.")
-                     manual_roi = None # Force calibration if dims invalid
+                     print("Warning: Manual ROI has invalid dimensions. Falling back to calibration.")
+                     manual_roi = None # Force calibration
+            else:
+                 # print("No valid manual ROI provided.") # Less verbose
+                 manual_roi = None # Ensure it's None if invalid or not provided
 
-            # Run calibration if no valid manual ROI was provided
-            if self.roi is None:
-                print("Attempting automatic calibration...")
-                # --- Add print statement to confirm execution path ---
-                print("--- monitor.py: About to create Calibration object ---")
-                self.calibration = Calibration(self.video_input, self.config)
-                # --- Correctly capture both return values ---
-                calibration_result_roi, calibration_result_map = self.calibration.run_calibration()
-
-                # --- Check results ---
-                if calibration_result_roi is not None:
-                    self.roi = calibration_result_roi
-                    self.variance_map = calibration_result_map # Store map (could be None if map calc failed)
-                    print(f"Calibration successful. ROI: {self.roi}")
-                    if self.variance_map is not None:
-                         # Ensure map is float32 if it exists
-                         if isinstance(self.variance_map, np.ndarray) and self.variance_map.dtype != np.float32:
-                              try:
-                                   self.variance_map = self.variance_map.astype(np.float32)
-                                   print(f"  Variance Map Shape: {self.variance_map.shape}, Dtype: {self.variance_map.dtype} (Converted to float32)")
-                              except Exception as e_cast:
-                                   print(f"  Warning: Failed to cast variance map to float32: {e_cast}. Setting map to None.")
-                                   self.variance_map = None
-                         elif isinstance(self.variance_map, np.ndarray):
-                              print(f"  Variance Map Shape: {self.variance_map.shape}, Dtype: {self.variance_map.dtype}")
-                         else: # Handle UMat case if necessary, though calibration should return NumPy
-                              print(f"  Variance Map Type: {type(self.variance_map)}. Check calibration return type.")
-
+            if self.roi is None: # If ROI wasn't set manually and calibration failed
+                print("Monitor initialization failed: Calibration unsuccessful.")
+                self.video_input.release()
+                return False
+            else: # ROI is valid (either manual or from calibration)
+                # If calibration was run, it should have returned the map.
+                # If ROI was manual, the map is None.
+                self.variance_map = None # Initialize map variable
+                if self.calibration: # Check if calibration object exists (meaning it was run)
+                    # Assume calibration.run_calibration() now returns (roi, map)
+                    # We already have self.roi, so we just need the map from the *result* of run_calibration
+                    # This requires adjusting how run_calibration is called or storing its full result.
+                    # Let's modify the call slightly for clarity:
+                    calibration_result_roi, calibration_result_map = self.calibration.run_calibration()
+                    if calibration_result_roi:
+                        self.roi = calibration_result_roi # Assign the potentially refined ROI
+                        self.variance_map = calibration_result_map # Store the map
+                        print(f"Calibration successful. ROI: {self.roi}, Variance Map Shape: {self.variance_map.shape if self.variance_map is not None else 'None'}")
                     else:
-                         print("  Warning: Calibration succeeded for ROI, but failed to generate variance map.")
-                else:
-                    # --- This is where the original failure occurred ---
-                    print("Monitor initialization failed: Calibration unsuccessful (run_calibration returned None for ROI).")
-                    self.video_input.release() # Release video if calibration fails
-                    return False
+                        print("Monitor initialization failed: Calibration unsuccessful.")
+                        self.video_input.release() # Release video if calibration fails
+                        return False
 
-            # --- At this point, self.roi should be valid, self.variance_map might be None ---
-
-            # 3. Initialize Motion Detector with the determined ROI and variance map
-            # MotionDetector.__init__ needs to handle variance_map being None
-            try:
-                self.motion_detector = MotionDetector(self.roi, self.config, self.variance_map)
-            except Exception as e_md:
-                 print(f"Error initializing MotionDetector: {e_md}")
-                 traceback.print_exc()
-                 self.video_input.release()
-                 return False
+            # 3. Initialize Motion Detector with the determined ROI
+            self.motion_detector = MotionDetector(self.roi, self.config, self.variance_map) # Pass the map
 
             # 4. Initialize Signal Processor
-            fps = self.video_input.get_fps()
-            if fps <= 0:
-                 print("Error: Cannot initialize SignalProcessor with invalid FPS.")
-                 self.video_input.release()
-                 return False
-            try:
-                self.signal_processor = SignalProcessor(fps, self.config)
-            except Exception as e_sp:
-                 print(f"Error initializing SignalProcessor: {e_sp}")
-                 traceback.print_exc()
-                 self.video_input.release()
-                 return False
+            self.signal_processor = SignalProcessor(self.video_input.get_fps(), self.config)
 
             # 5. Initialize Adaptive Controller (if enabled)
             if self.config.get('USE_ADAPTIVE_CONTROL', False):
-                try:
-                    self.adaptive_controller = AdaptiveController(self.config)
-                    # Sync controller's initial state with the detector's state
-                    self.adaptive_controller.current_method = self.motion_detector.method
-                except Exception as e_ac:
-                     print(f"Error initializing AdaptiveController: {e_ac}")
-                     # Continue initialization even if adaptive control fails? Or return False?
-                     # For now, print warning and continue.
-                     print("Warning: AdaptiveController failed to initialize, adaptive control disabled.")
-                     self.adaptive_controller = None
-
+                self.adaptive_controller = AdaptiveController(self.config)
+                # Sync controller's initial state with the detector's state
+                self.adaptive_controller.current_method = self.motion_detector.method
 
             self.is_initialized = True
             print("Respiration Monitor initialized successfully.")
@@ -175,6 +124,7 @@ class RespirationMonitor:
              self.is_initialized = False
              return False
 
+
     def run_cycle(self):
         """Runs one cycle of frame capture and processing.
 
@@ -182,7 +132,7 @@ class RespirationMonitor:
             dict: A dictionary containing results like:
                   {'success': bool, 'bpm': float, 'normalized_signal': float,
                    'method': str, 'frame': np.ndarray/None, 'roi': tuple/None,
-                   'peaks': list, 'error': str (optional)}
+                   'error': str (optional)}
                   Returns {'success': False} if not initialized or error occurs.
         """
         if not self.is_initialized or self.video_input is None:
@@ -192,7 +142,6 @@ class RespirationMonitor:
             # 1. Get Frame
             success, frame = self.video_input.get_frame()
             if not success:
-                # print("Debug: End of video source reached or error reading frame.") # Reduce noise
                 return {'success': False, 'error': 'Video ended or failed'}
 
             # Store the frame (convert UMat for storage/return if needed)
@@ -203,16 +152,10 @@ class RespirationMonitor:
                  print(f"Warning: Could not get frame data for storage: {e_get}")
                  self.last_frame = None # Set to None if conversion fails
 
-            # Ensure frame is usable before motion detection
-            if self.last_frame is None:
-                 return {'success': False, 'error': 'Failed to get valid frame data'}
-
-
             # 2. Detect Motion
             # Ensure motion_detector exists (should always if initialized)
             if self.motion_detector is None:
                  return {'success': False, 'error': 'Motion detector not initialized'}
-            # Pass the original frame (UMat or NumPy) to process_frame
             motion_value = self.motion_detector.process_frame(frame)
 
             # 3. Process Signal
@@ -220,7 +163,6 @@ class RespirationMonitor:
             if self.signal_processor is None:
                  return {'success': False, 'error': 'Signal processor not initialized'}
             self.signal_processor.process_signal(motion_value)
-            # --- Assume analyze_buffer now stores peaks in self.last_peaks ---
             filtered_signal, bpm, peaks, normalized_signal_value = self.signal_processor.analyze_buffer()
 
             # 4. Prepare Results
@@ -232,7 +174,9 @@ class RespirationMonitor:
                 'method': self.motion_detector.method,
                 'frame': self.last_frame, # Return the processed frame (NumPy)
                 'roi': self.roi,
-                'peaks': peaks, # Pass peaks info for UI
+                # Optionally return more detailed data if needed by caller
+                # 'filtered_signal_buffer': filtered_signal,
+                # 'peaks': peaks,
             }
             return results
 
@@ -244,9 +188,9 @@ class RespirationMonitor:
 
     def trigger_adaptation(self, fps):
          """Externally trigger the adaptive controller logic, passing current FPS."""
-         if self.adaptive_controller and self.motion_detector and self.signal_processor:
-              # Get necessary metrics
-              bpm_stability = self.signal_processor.get_bpm_stability()
+         if self.adaptive_controller and self.motion_detector:
+              # Get necessary metrics (some might need to be stored if not readily available)
+              bpm_stability = self.signal_processor.get_bpm_stability() if self.signal_processor else 0.0
               tracked_points = self.motion_detector.get_tracked_points_count()
 
               # Update controller's monitor state
@@ -258,23 +202,6 @@ class RespirationMonitor:
         """Returns the currently active motion detection method."""
         return self.motion_detector.method if self.motion_detector else "N/A"
 
-    # --- Add method to get signal history for UI ---
-    def get_filtered_signal_history(self):
-        """Returns the last valid filtered signal buffer for plotting."""
-        if self.signal_processor:
-            # Return the stored last valid signal (could be raw if filtering failed)
-            # Assumes SignalProcessor has 'last_valid_filtered_signal' attribute
-            return getattr(self.signal_processor, 'last_valid_filtered_signal', None)
-        return None
-
-    def get_last_detected_peaks(self):
-         """Returns the indices of the last detected peaks relative to the signal history."""
-         if self.signal_processor:
-              # Assumes SignalProcessor stores the last peaks found in 'last_peaks'
-              return getattr(self.signal_processor, 'last_peaks', [])
-         return []
-
-
     def stop(self):
         """Releases resources, particularly the video input."""
         print("Stopping Respiration Monitor...")
@@ -284,3 +211,4 @@ class RespirationMonitor:
         print("Respiration Monitor stopped.")
 
 # (No test block needed here, main.py handles execution)
+

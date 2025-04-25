@@ -3,8 +3,6 @@
 # MODIFIED: To return variance map for weighted averaging.
 # MODIFIED: Added detailed debug prints for troubleshooting calibration failures.
 
-print("***** EXECUTING src/calibration.py (Debug Version) *****")
-
 import cv2
 import numpy as np
 from scipy import signal as sp_signal

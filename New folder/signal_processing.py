@@ -1,6 +1,5 @@
 # src/signal_processing.py
 # Contains the SignalProcessor class for filtering, peak detection, and BPM calculation.
-# MODIFIED: Added self.last_peaks attribute
 
 import numpy as np
 from scipy import signal as sp_signal
@@ -41,8 +40,6 @@ class SignalProcessor:
         self.last_bpms = collections.deque(maxlen=10) # For stability calculation
         self.debug_prints = config.get('DEBUG_PRINT_VALUES', False)
         self.last_valid_filtered_signal = None # Store last good signal for OSC/plot fallback
-        # --- CHANGE: Initialize last_peaks ---
-        self.last_peaks = []
         self.filter_sos = None # Initialize filter coefficients
 
         # Pre-calculate filter coefficients (Rec 5a)
@@ -69,10 +66,10 @@ class SignalProcessor:
             if self.debug_prints and abs(motion_value) > 1000: # Arbitrary threshold for "large"
                  print(f"DEBUG: Large raw motion value received: {motion_value:.2e}")
         else:
-            # print(f"Warning: Received non-finite motion value ({motion_value}). Skipping.") # Reduce noise
+            print(f"Warning: Received non-finite motion value ({motion_value}). Skipping.")
             # Optional: Append a default value? (e.g., 0 or last valid)
-            if len(self.buffer) > 0: self.buffer.append(self.buffer[-1]) # Repeat last valid
-            # else: self.buffer.append(0) # Or append 0 if buffer is empty
+            # if len(self.buffer) > 0: self.buffer.append(self.buffer[-1])
+            # else: self.buffer.append(0)
 
     def _fit_gaussian_to_peak(self, signal, peak_index, estimated_width):
         """Fits a Gaussian function to a window around the peak."""
@@ -140,7 +137,6 @@ class SignalProcessor:
         peaks = np.array([]) # Default value
         filtered_signal = None # Default value
         normalized_signal_value = 0.0 # Default value
-        self.last_peaks = [] # Reset last peaks for this cycle
 
         # Check if buffer has enough data
         if len(self.buffer) < self.min_buffer_fill:
@@ -150,20 +146,18 @@ class SignalProcessor:
                  sig_mean = np.mean(last_signal)
                  sig_std = np.std(last_signal)
                  if sig_std > 1e-6: normalized_signal_value = np.clip((last_signal[-1] - sig_mean) / (3 * sig_std), -2, 2)
-            # --- Return empty list for peaks if buffer not full ---
-            return filtered_signal, bpm, [], normalized_signal_value # Return empty list
+            return filtered_signal, bpm, peaks, normalized_signal_value
 
         signal_arr = np.array(self.buffer)
 
         # --- Input Signal Validation ---
         if not np.all(np.isfinite(signal_arr)):
-            # print("Warning: Non-finite values in buffer PRE-filter. Attempting to use finite subset.") # Reduce noise
-            finite_mask = np.isfinite(signal_arr)
-            if np.count_nonzero(finite_mask) < self.min_buffer_fill:
-                 # print("  Not enough finite values remaining.") # Reduce noise
-                 # --- Return empty list for peaks on error ---
-                 return None, bpm, [], normalized_signal_value # Return empty list
-            signal_arr = signal_arr[finite_mask] # Use only finite values
+            print("Warning: Non-finite values in buffer PRE-filter. Attempting to use finite subset.")
+            finite_signal = signal_arr[np.isfinite(signal_arr)]
+            if len(finite_signal) < self.min_buffer_fill:
+                 print("  Not enough finite values remaining.")
+                 return None, bpm, peaks, normalized_signal_value # Return defaults
+            signal_arr = finite_signal # Use only finite values
 
         # --- Debug Print 2: Check max abs value before filtering ---
         max_abs_raw = np.max(np.abs(signal_arr)) if len(signal_arr) > 0 else 0
@@ -200,8 +194,7 @@ class SignalProcessor:
              if self.last_valid_filtered_signal is not None and len(self.last_valid_filtered_signal) > 0:
                  last_signal = self.last_valid_filtered_signal; sig_mean = np.mean(last_signal); sig_std = np.std(last_signal)
                  if sig_std > 1e-6: normalized_signal_value = np.clip((last_signal[-1] - sig_mean) / (3 * sig_std), -2, 2)
-             # --- Return empty list for peaks on error ---
-             return None, bpm, [], normalized_signal_value # Return empty list
+             return None, bpm, peaks, normalized_signal_value # Return defaults, but with potentially updated normalized value
 
         # Store the last known good signal (could be raw if filtering failed)
         self.last_valid_filtered_signal = filtered_signal.copy()
@@ -233,22 +226,17 @@ class SignalProcessor:
                                                      distance=min_dist_samples,
                                                      prominence=prominence_val,
                                                      width=(None, None))
-            # --- Store peaks ---
-            self.last_peaks = peaks.tolist() # Store as list
-
         except ValueError as e_peaks: # Catch specific SciPy errors
             print(f"Error during peak finding (ValueError): {e_peaks}")
-            # --- Return empty list for peaks on error ---
-            return filtered_signal, bpm, [], normalized_signal_value
+            # Return current signal state, but 0 BPM and empty peaks
+            return filtered_signal, bpm, peaks, normalized_signal_value
         except Exception as e_peaks_other: # Catch other unexpected errors
             print(f"Error during peak finding (Exception): {e_peaks_other}")
-            # --- Return empty list for peaks on error ---
-            return filtered_signal, bpm, [], normalized_signal_value
+            return filtered_signal, bpm, peaks, normalized_signal_value
 
         # Proceed only if enough peaks are found
         if len(peaks) < 2:
-            # --- Return currently stored peaks (might be empty) ---
-            return filtered_signal, bpm, self.last_peaks, normalized_signal_value
+            return filtered_signal, bpm, peaks, normalized_signal_value
 
         # --- Optional Gaussian Fitting (Rec 5c) ---
         if self.use_gaussian_fit:
@@ -271,12 +259,9 @@ class SignalProcessor:
                      valid_peaks_indices.append(p)
 
             peaks = np.array(valid_peaks_indices) # Update peaks array
-            # --- Update stored peaks after filtering ---
-            self.last_peaks = peaks.tolist()
             # Check again if enough peaks remain after filtering
             if len(peaks) < 2:
-                 # --- Return currently stored peaks ---
-                 return filtered_signal, bpm, self.last_peaks, normalized_signal_value
+                 return filtered_signal, bpm, peaks, normalized_signal_value
 
         # --- Calculate BPM (Rec 5b result) ---
         if len(peaks) >= 2:
@@ -287,21 +272,13 @@ class SignalProcessor:
             # else: bpm remains 0.0
         # else: bpm remains 0.0
 
-        # --- Return currently stored peaks ---
-        return filtered_signal, bpm, self.last_peaks, normalized_signal_value
+        return filtered_signal, bpm, peaks, normalized_signal_value
 
     def get_bpm_stability(self):
         """Calculates the standard deviation of the last few BPM values."""
         if len(self.last_bpms) < 5: # Need a few values for meaningful std dev
             return 0.0 # Return 0 if not enough data, avoids warnings
-        try:
-             # Ensure data is suitable for std calculation
-             valid_bpms = [b for b in self.last_bpms if np.isfinite(b)]
-             if len(valid_bpms) < 2: return 0.0 # Need at least 2 finite values
-             return np.std(valid_bpms)
-        except Exception as e_std: # Catch potential errors with std calculation
-             print(f"Warning: Error calculating BPM stability: {e_std}")
-             return 0.0
+        return np.std(self.last_bpms)
 
 # Example usage (for testing this module directly)
 if __name__ == '__main__':
@@ -348,3 +325,4 @@ if __name__ == '__main__':
             print(f"  Time ~{i*chunk_size/sampling_rate:.1f}s: BPM={results[i]['bpm']:.1f}, NormVal={results[i]['norm']:.3f}, Peaks={results[i]['peaks_count']}")
     else:
         print("No analysis results generated (buffer might not have filled sufficiently).")
+

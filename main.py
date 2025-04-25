@@ -7,6 +7,14 @@ import numpy as np
 import cv2 # Needed for UI display frame conversion
 import matplotlib.pyplot as plt # Needed for UI
 import matplotlib.patches as patches # Needed for UI
+import os
+
+# --- Configuration File Selection ---
+# Specify the config file to load from the 'configs' folder
+# You could make this a command-line argument later if needed
+# config_filename = "config_default.json"
+config_filename = "profile_3.json" # Example: Use the optical flow config
+CONFIG_FILEPATH = os.path.join("profiles", config_filename)
 
 # --- OSC Library Import ---
 # Ensure you have installed it: pip install python-osc
@@ -26,7 +34,7 @@ except ImportError:
 # Import the core monitor class
 try:
     # Assuming respiration_monitor.py is in the same directory
-    from respiration_monitor import RespirationMonitor, DEFAULT_CONFIG
+    from respiration_monitor import RespirationMonitor
 except ImportError:
     print("ERROR: Could not import RespirationMonitor from respiration_monitor.py.")
     print("Ensure respiration_monitor.py is in the same directory as main.py.")
@@ -291,8 +299,8 @@ class MainApplication:
         print("Starting Main Application...")
 
         # --- Initialize Monitor ---
-        monitor_config_overrides = { }
-        self.monitor = RespirationMonitor(config_overrides=monitor_config_overrides)
+        # Initialize the main monitor, passing the chosen config FILEPATH
+        self.monitor = RespirationMonitor(config_filepath=CONFIG_FILEPATH)
         if not self.monitor.initialize():
             print("Failed to initialize Respiration Monitor. Exiting."); self.running = False; return
 

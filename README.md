@@ -1,4 +1,4 @@
-# Respmon Enhanced (OSC Output Version)
+# RespModM4L
 
 This project uses a webcam to monitor breathing patterns in real-time and outputs the detected respiratory signal and calculated breaths per minute (BPM) via Open Sound Control (OSC) for integration with other applications like Ableton Live (using Max for Live). It also provides an optional visual interface showing the video feed, selected Region of Interest (ROI), and the breathing signal plot.
 
